@@ -47,10 +47,11 @@ def left_pad_sequence(
                 [ 8,  9, 10, 11, 12]])
     """
     return pad_sequence(
-        map(lambda x: torch.flip(x, dims=[0]), sequences),
+        sequences,
         batch_first=batch_first,
         padding_value=padding_value,
-    ).flip(dims=[int(batch_first)])
+        padding_side="left",
+    )
 
 
 def padded_collate(
