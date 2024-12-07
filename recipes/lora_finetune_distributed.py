@@ -492,13 +492,21 @@ class LoRAFinetuneRecipeDistributed(FTRecipeInterface):
             lora_device = "cpu" if fsdp_cpu_offload else self._device
             for m in model.modules():
                 if (
-                    isinstance(m, LoRALinear) or isinstance(m, DoRALinear)
-                ) and not lora_weights_state_dict:
+                    isinstance(m, (LoRALinear, DoRALinear))
+                    and not lora_weights_state_dict
+                ):
                     # lora may not be covered in state dict
                     # if finetune for the 1st time
                     m.lora_a.to_empty(device=lora_device)
                     m.lora_b.to_empty(device=lora_device)
                     m.initialize_parameters()
+
+                    if isinstance(m, DoRALinear):
+                        magnitude = nn.Parameter(
+                            torch.empty_like(m.magnitude, device=lora_device),
+                            requires_grad=m.magnitude.requires_grad,
+                        )
+                        torch.utils.swap_tensors(m.magnitude, magnitude)
                 # RoPE is not covered in state dict
                 if hasattr(m, "rope_init"):
                     m.rope_init()
@@ -764,7 +772,6 @@ class LoRAFinetuneRecipeDistributed(FTRecipeInterface):
         self._profiler.start()
         # self.epochs_run should be non-zero when we're resuming from a checkpoint
         for curr_epoch in range(self.epochs_run, self.total_epochs):
-
             # Update the sampler to ensure data is correctly shuffled across epochs
             # in case shuffle is True
             self._sampler.set_epoch(curr_epoch)
