@@ -13,10 +13,10 @@ import torch
 import torchao
 from torch import nn
 from torch.autograd.graph import saved_tensors_hooks
-from torchao.quantization import NF4Tensor
 
 from torchtune.modules import TiedLinear
 from torchtune.utils import get_logger
+from torchtune.utils._torchao import NF4Tensor
 
 log = get_logger("DEBUG")
 

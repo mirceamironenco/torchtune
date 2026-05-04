@@ -16,7 +16,7 @@ import torch
 
 import torch.nn as nn
 from torch._subclasses.fake_tensor import FakeTensorConverter, FakeTensorMode
-from torchao.quantization import NF4Tensor
+from torchtune.utils._torchao import NF4Tensor
 
 _use_low_cpu_ram: bool = False
 
