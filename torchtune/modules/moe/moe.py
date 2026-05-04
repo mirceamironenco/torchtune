@@ -4,9 +4,10 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-from typing import Optional
+from typing import Literal, Optional
 
 import torch
+import torch.nn.functional as F
 from torch import nn
 
 from .utils import should_use_grouped_mm
@@ -21,6 +22,12 @@ class TokenChoiceTopKRouter(nn.Module):
         dim (int): Dimension of input tokens.
         num_experts (int): Number of experts in each moe layer.
         experts_per_token (int): Number of experts each token will be routed to in Token Choice.
+        normalize_topk_probs (bool): Whether to normalize the selected top-k
+            expert scores to sum to 1 for each token. Default is False.
+        score_function (Literal["softmax", "sigmoid"]): Function used to convert
+            router logits to expert scores before selecting top-k experts. ``"sigmoid"``
+            matches Llama4-style routing, while ``"softmax"`` matches Qwen3 MoE-style
+            routing. Default is ``"sigmoid"``.
     """
 
     def __init__(
@@ -30,12 +37,16 @@ class TokenChoiceTopKRouter(nn.Module):
         dim: int,
         num_experts: int,
         experts_per_token: int,
+        normalize_topk_probs: bool = False,
+        score_function: Literal["softmax", "sigmoid"] = "sigmoid",
     ):
         super().__init__()
         self.gate = gate
         self.dim = dim
         self.num_experts = num_experts
         self.experts_per_token = experts_per_token
+        self.normalize_topk_probs = normalize_topk_probs
+        self.score_function = score_function
 
     def forward(
         self, x: torch.Tensor
@@ -51,19 +62,37 @@ class TokenChoiceTopKRouter(nn.Module):
                 Token indices for routed_input with shape ``(bs*slen*top_k,)``.
             num_tokens_per_expert (torch.Tensor):
                 Number of tokens assigned to each expert with shape ``(num_experts,)``.
+
+        Raises:
+            NotImplementedError: If ``score_function`` is not ``"sigmoid"`` or
+                ``"softmax"``.
         """
         # scores shape (bs*slen, num_experts)
         scores = self.gate(x)
 
-        # By default, sigmoid is performed in float32 to avoid loss explosion
-        scores = torch.sigmoid(scores.to(torch.float32)).to(x.dtype)
+        # By default, sigmoid/softmax is performed in float32 to avoid loss explosion.
+        # For softmax routing, keep scores in fp32 through top-k normalization,
+        # matching the HF Qwen3 MoE implementation.
+        if self.score_function == "softmax":
+            scores = F.softmax(scores, dim=1, dtype=torch.float32)
+        elif self.score_function == "sigmoid":
+            scores = torch.sigmoid(scores.to(torch.float32)).to(x.dtype)
+        else:
+            raise NotImplementedError(
+                f"TopKRouter score function must be sigmoid/softmax, got {self.score_function}"
+            )
 
         # top scores shape (bs*slen, top_k)
         top_scores, selected_experts_indices = torch.topk(
             scores, k=self.experts_per_token, dim=1
         )
-        self.selected_experts_indices = selected_experts_indices
-        # top_scores /= top_scores.sum(dim=-1, keep_dim=True).to(x.dtype)
+
+        if self.normalize_topk_probs:
+            denom = top_scores.sum(dim=-1, keepdim=True) + 1e-20
+            top_scores = top_scores / denom
+
+        if self.score_function == "softmax":
+            top_scores = top_scores.to(x.dtype)
 
         # group tokens together by expert indices from 0 to num_experts and pass that to experts forward
         num_tokens_per_expert = torch.histc(
@@ -93,6 +122,13 @@ class MoE(nn.Module):
         experts (nn.Module): experts module.
         router (nn.Module): router module.
         shared_expert (Optional[nn.Module]): shared expert module. Default is None.
+        router_score_scaling (Literal["input", "output"]): Whether top-k router scores
+            scale routed inputs before the experts, or expert outputs before scatter-add.
+            ``"input"`` matches Llama4-style routing and ``"output"`` matches Qwen3
+            MoE-style routing. Default is ``"input"``.
+
+    Raises:
+        ValueError: If ``router_score_scaling`` is not ``"input"`` or ``"output"``.
     """
 
     def __init__(
@@ -101,11 +137,18 @@ class MoE(nn.Module):
         experts: nn.Module,
         router: nn.Module,
         shared_expert: Optional[nn.Module] = None,
+        router_score_scaling: Literal["input", "output"] = "input",
     ):
         super().__init__()
+        if router_score_scaling not in ["input", "output"]:
+            raise ValueError(
+                "router_score_scaling must be either 'input' or 'output', "
+                f"got {router_score_scaling}"
+            )
         self.experts = experts
         self.router = router
         self.shared_expert = shared_expert
+        self.router_score_scaling = router_score_scaling
         self.use_grouped_mm = should_use_grouped_mm()
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -134,7 +177,9 @@ class MoE(nn.Module):
             dim=0,
             index=token_indices,
         )
-        routed_input = routed_input * top_scores.reshape(-1, 1)
+
+        if self.router_score_scaling == "input":
+            routed_input = routed_input * top_scores.reshape(-1, 1)
 
         if self.use_grouped_mm:
             # NOTE: In order to use torch._grouped_mm, we need to make sure
@@ -163,8 +208,15 @@ class MoE(nn.Module):
             routed_input = torch.vstack((routed_input, routed_input.new_zeros((dim))))
             routed_input = routed_input[permuted_indices, :]
 
+            if self.router_score_scaling == "output":
+                top_scores = torch.cat((top_scores, top_scores.new_zeros(1)))
+                top_scores = top_scores[permuted_indices]
+
         # shape (bs*slen*top_k, dim)
         routed_output = self.experts(routed_input, num_tokens_per_expert)
+
+        if self.router_score_scaling == "output":
+            routed_output = routed_output * top_scores.reshape(-1, 1)
 
         # shared expert
         if self.shared_expert is not None:

@@ -560,6 +560,8 @@ class FullModelHFCheckpointer(_CheckpointerInterface):
             state_dict (dict[str, Any]): torchtune checkpoint state dict
 
         Raises:
+            KeyError: If the Qwen3 MoE config does not contain ``num_experts`` or
+                ``num_local_experts``.
             ValueError: If the values in the input state_dict are not Tensors
         """
         if self._enable_dcp:
@@ -654,6 +656,24 @@ class FullModelHFCheckpointer(_CheckpointerInterface):
                 merged_state_dict,
                 num_heads=self._config["num_attention_heads"],
                 num_kv_heads=self._config["num_key_value_heads"],
+                dim=self._config["hidden_size"],
+                tie_word_embeddings=self._config["tie_word_embeddings"],
+            )
+        elif self._model_type == ModelType.QWEN3_MOE:
+            from torchtune.models.qwen3._convert_weights import qwen3_moe_hf_to_tune
+
+            num_experts = self._config.get(
+                "num_experts", self._config.get("num_local_experts")
+            )
+            if num_experts is None:
+                raise KeyError(
+                    "Expected 'num_experts' or 'num_local_experts' in Qwen3 MoE config."
+                )
+            converted_state_dict[training.MODEL_KEY] = qwen3_moe_hf_to_tune(
+                merged_state_dict,
+                num_heads=self._config["num_attention_heads"],
+                num_kv_heads=self._config["num_key_value_heads"],
+                num_experts=num_experts,
                 dim=self._config["hidden_size"],
                 tie_word_embeddings=self._config["tie_word_embeddings"],
             )
@@ -761,6 +781,8 @@ class FullModelHFCheckpointer(_CheckpointerInterface):
             dir_prefix (str): Prefix for the checkpoint directory. Default is 'epoch'.
 
         Raises:
+            KeyError: If the Qwen3 MoE config does not contain ``num_experts`` or
+                ``num_local_experts``.
             ValueError:
                 If ``adapter_only`` is True and adapter checkpoint not found in state_dict.
                 If ``output_dir`` is not specified.
@@ -823,6 +845,24 @@ class FullModelHFCheckpointer(_CheckpointerInterface):
                     state_dict[training.MODEL_KEY],
                     num_heads=self._config["num_attention_heads"],
                     num_kv_heads=self._config["num_key_value_heads"],
+                    dim=self._config["hidden_size"],
+                    tie_word_embeddings=self._config["tie_word_embeddings"],
+                )
+            elif self._model_type == ModelType.QWEN3_MOE:
+                from torchtune.models.qwen3._convert_weights import qwen3_moe_tune_to_hf
+
+                num_experts = self._config.get(
+                    "num_experts", self._config.get("num_local_experts")
+                )
+                if num_experts is None:
+                    raise KeyError(
+                        "Expected 'num_experts' or 'num_local_experts' in Qwen3 MoE config."
+                    )
+                state_dict[training.MODEL_KEY] = qwen3_moe_tune_to_hf(
+                    state_dict[training.MODEL_KEY],
+                    num_heads=self._config["num_attention_heads"],
+                    num_kv_heads=self._config["num_key_value_heads"],
+                    num_experts=num_experts,
                     dim=self._config["hidden_size"],
                     tie_word_embeddings=self._config["tie_word_embeddings"],
                 )
@@ -935,6 +975,10 @@ class FullModelHFCheckpointer(_CheckpointerInterface):
                 logger.warning(
                     "Saving Llama4 adapter weights to PEFT format is not supported, saving to torchtune format instead"
                 )
+            elif self._model_type == ModelType.QWEN3_MOE:
+                logger.warning(
+                    "Saving Qwen3 MoE adapter weights to PEFT format is not supported, saving to torchtune format instead"
+                )
             else:
                 config = (
                     self._config["text_config"]
@@ -982,6 +1026,10 @@ class FullModelHFCheckpointer(_CheckpointerInterface):
             elif self._model_type == ModelType.LLAMA3_VISION:
                 logger.warning(
                     "PEFT integration for Llama3.2 Vision is not supported, skipping adapter config save"
+                )
+            elif self._model_type == ModelType.QWEN3_MOE:
+                logger.warning(
+                    "PEFT integration for Qwen3 MoE is not supported, skipping adapter config save"
                 )
             else:
                 state_dict[
