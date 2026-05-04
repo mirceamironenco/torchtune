@@ -48,6 +48,12 @@ _FROM_HF_MOE = {
 _HF_PACKED_EXPERT_RE = re.compile(
     r"^model\.layers\.(\d+)\.mlp\.experts\.(gate_up_proj|down_proj)$"
 )
+# Matches HF's per-expert weights, for example:
+# model.layers.0.mlp.experts.12.down_proj.weight
+_HF_EXPERT_RE = re.compile(
+    r"^model\.layers\.(\d+)\.mlp\.experts\.(\d+)\."
+    r"(gate_proj|up_proj|down_proj)\.weight$"
+)
 # Matches torchtune's grouped expert weights, for example:
 # layers.0.mlp.experts.gate_proj
 _TUNE_EXPERT_RE = re.compile(
@@ -159,9 +165,10 @@ def qwen3_moe_hf_to_tune(
     State dicts from multiple checkpoint files should be consolidated into a single state dict
     before calling this function.
 
-    Expert weights are stored as packed 3D tensors in HF's format, and split by projection
-    in torchtune's format. For example, ``model.layers.0.mlp.experts.gate_up_proj`` is split
-    into ``layers.0.mlp.experts.gate_proj`` and ``layers.0.mlp.experts.up_proj``.
+    Expert weights may be stored as packed 3D tensors or per-expert 2D tensors in
+    HF's format, and are split by projection in torchtune's format. For example,
+    ``model.layers.0.mlp.experts.gate_up_proj`` is split into
+    ``layers.0.mlp.experts.gate_proj`` and ``layers.0.mlp.experts.up_proj``.
 
     Args:
         state_dict (dict[str, torch.Tensor]): State dict in HF's format.
@@ -177,8 +184,8 @@ def qwen3_moe_hf_to_tune(
         dict[str, torch.Tensor]: State dict in torchtune's format.
 
     Raises:
-        ValueError: If ``num_experts`` is not positive, or if a packed expert
-            tensor has an unexpected shape.
+        ValueError: If ``num_experts`` is not positive, or if an expert tensor
+            has an unexpected shape or missing expert weights.
     """
     if num_experts <= 0:
         raise ValueError(f"num_experts must be positive, got {num_experts}.")
@@ -195,9 +202,9 @@ def qwen3_moe_hf_to_tune(
         if "rotary_emb.inv_freq" in key:  # Skip loading the position embeddings
             continue
 
-        expert_match = _HF_PACKED_EXPERT_RE.match(key)
-        if expert_match is not None:
-            layer_num, projection = expert_match.groups()
+        packed_expert_match = _HF_PACKED_EXPERT_RE.match(key)
+        if packed_expert_match is not None:
+            layer_num, projection = packed_expert_match.groups()
             if value.dim() != 3:
                 raise ValueError(
                     f"Expected a 3D packed expert weight for {key}, got shape {value.shape}."
@@ -224,6 +231,33 @@ def qwen3_moe_hf_to_tune(
                 ] = value.transpose(1, 2)
             continue
 
+        expert_match = _HF_EXPERT_RE.match(key)
+        if expert_match is not None:
+            layer_num, expert_idx, projection = expert_match.groups()
+            if expert_idx != "0":
+                continue
+
+            expert_tensors = []
+            for idx in range(num_experts):
+                expert_key = (
+                    f"model.layers.{layer_num}.mlp.experts.{idx}.{projection}.weight"
+                )
+                if expert_key not in state_dict:
+                    raise ValueError(
+                        f"Missing expert weight {expert_key} while converting layer {layer_num}."
+                    )
+                expert_value = state_dict[expert_key]
+                if expert_value.dim() != 2:
+                    raise ValueError(
+                        f"Expected a 2D expert weight for {expert_key}, got shape "
+                        f"{expert_value.shape}."
+                    )
+                expert_tensors.append(expert_value.T)
+            converted_state_dict[
+                f"layers.{layer_num}.mlp.experts.{projection}"
+            ] = torch.stack(expert_tensors)
+            continue
+
         new_key = get_mapped_key(key, _FROM_HF_MOE)
         converted_state_dict[new_key] = value
 
@@ -240,9 +274,9 @@ def qwen3_moe_tune_to_hf(
     tie_word_embeddings: bool = False,
 ) -> dict[str, torch.Tensor]:
     """
-    Convert a Qwen3 MoE state dict from torchtune's format to HF's format. This function
-    doesn't handle any sharding or splitting of state dicts. It follows the
-    state_dict IN -> state_dict OUT pattern.
+    Convert a Qwen3 MoE state dict from torchtune's format to HF's per-expert
+    format. This function doesn't handle any sharding or splitting of state dicts.
+    It follows the state_dict IN -> state_dict OUT pattern.
 
     Args:
         state_dict (dict[str, torch.Tensor]): State dict in torchtune's format.
@@ -309,14 +343,17 @@ def qwen3_moe_tune_to_hf(
                 f"Expected gate_proj and up_proj shapes to match for layer {layer_num}, "
                 f"got {gate_proj.shape} and {up_proj.shape}."
             )
-        converted_state_dict[
-            f"model.layers.{layer_num}.mlp.experts.gate_up_proj"
-        ] = torch.cat(
-            [gate_proj.transpose(1, 2), up_proj.transpose(1, 2)],
-            dim=1,
-        ).contiguous()
-        converted_state_dict[
-            f"model.layers.{layer_num}.mlp.experts.down_proj"
-        ] = down_proj.transpose(1, 2).contiguous()
+        for expert_idx, tensor in enumerate(torch.unbind(gate_proj)):
+            converted_state_dict[
+                f"model.layers.{layer_num}.mlp.experts.{expert_idx}.gate_proj.weight"
+            ] = tensor.T.contiguous()
+        for expert_idx, tensor in enumerate(torch.unbind(up_proj)):
+            converted_state_dict[
+                f"model.layers.{layer_num}.mlp.experts.{expert_idx}.up_proj.weight"
+            ] = tensor.T.contiguous()
+        for expert_idx, tensor in enumerate(torch.unbind(down_proj)):
+            converted_state_dict[
+                f"model.layers.{layer_num}.mlp.experts.{expert_idx}.down_proj.weight"
+            ] = tensor.T.contiguous()
 
     return converted_state_dict
