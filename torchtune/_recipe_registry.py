@@ -182,6 +182,10 @@ _ALL_RECIPES = [
             Config(name="qwen3/4B_full", file_path="qwen3/4B_full.yaml"),
             Config(name="qwen3/8B_full", file_path="qwen3/8B_full.yaml"),
             Config(name="qwen3/30B_A3B_full", file_path="qwen3/30B_A3B_full.yaml"),
+            Config(
+                name="qwen3/235B_A22B_full",
+                file_path="qwen3/235B_A22B_full.yaml",
+            ),
         ],
         supports_distributed=True,
     ),

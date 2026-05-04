@@ -393,6 +393,66 @@ def qwen3_moe_30b_a3b_instruct() -> TransformerDecoder:
     )
 
 
+def qwen3_moe_235b_a22b_base() -> TransformerDecoder:
+    """
+    Builder for creating a Qwen3 MoE 235B-A22B base model initialized w/ the default parameter values
+    from https://huggingface.co/Qwen/Qwen3-235B-A22B
+
+    Returns:
+        TransformerDecoder: Instantiation of Qwen3 MoE 235B-A22B base model
+    """
+    return qwen3_moe(
+        vocab_size=151936,
+        num_layers=94,
+        num_heads=64,
+        num_kv_heads=4,
+        embed_dim=4096,
+        moe_intermediate_dim=1536,
+        num_experts=128,
+        num_experts_per_token=8,
+        max_seq_len=40960,
+        head_dim=128,
+        attn_dropout=0.0,
+        norm_eps=1e-6,
+        rope_base=1000000.0,
+        q_proj_bias=False,
+        k_proj_bias=False,
+        v_proj_bias=False,
+        q_norm=True,
+        k_norm=True,
+    )
+
+
+def qwen3_moe_235b_a22b_instruct() -> TransformerDecoder:
+    """
+    Builder for creating a Qwen3 MoE 235B-A22B instruct model initialized w/ the default parameter values
+    from https://huggingface.co/Qwen/Qwen3-235B-A22B-Instruct-2507
+
+    Returns:
+        TransformerDecoder: Instantiation of Qwen3 MoE 235B-A22B instruct model
+    """
+    return qwen3_moe(
+        vocab_size=151936,
+        num_layers=94,
+        num_heads=64,
+        num_kv_heads=4,
+        embed_dim=4096,
+        moe_intermediate_dim=1536,
+        num_experts=128,
+        num_experts_per_token=8,
+        max_seq_len=262144,
+        head_dim=128,
+        attn_dropout=0.0,
+        norm_eps=1e-6,
+        rope_base=5000000.0,
+        q_proj_bias=False,
+        k_proj_bias=False,
+        v_proj_bias=False,
+        q_norm=True,
+        k_norm=True,
+    )
+
+
 def qwen3_tokenizer(
     path: str,
     merges_file: str,
